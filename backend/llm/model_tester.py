@@ -3,16 +3,15 @@ Runs anonymized case text through multiple Groq-hosted LLMs and scores each outp
 Models tested: Kimi K2, Llama 3.3 70B, Gemma 2 9B, DeepSeek R1, Qwen QwQ 32B, Mixtral 8x7B.
 """
 import re
-from .groq_client import chat
-from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from llm.groq_client import chat
+from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 MODELS = [
-    {"id": "moonshotai/kimi-k2", "label": "Kimi K2 (Moonshot AI)"},
-    {"id": "llama-3.3-70b-versatile", "label": "Llama 3.3 70B (Meta)"},
-    {"id": "gemma2-9b-it", "label": "Gemma 2 9B (Google)"},
-    {"id": "deepseek-r1-distill-llama-70b", "label": "DeepSeek R1 Distill 70B"},
-    {"id": "qwen-qwq-32b", "label": "Qwen QwQ 32B (Alibaba)"},
-    {"id": "mixtral-8x7b-32768", "label": "Mixtral 8x7B (Mistral AI)"},
+    {"id": "qwen/qwen3.6-27b", "label": "Qwen 3.6 27B (Alibaba)"},
+    {"id": "openai/gpt-oss-20b", "label": "GPT OSS 20B (OpenAI)"},
+    {"id": "openai/gpt-oss-120b", "label": "GPT OSS 120B (OpenAI)"},
+    {"id": "groq/compound", "label": "Compound (Groq)"},
+    {"id": "groq/compound-mini", "label": "Compound Mini (Groq)"},
 ]
 
 _LEGAL_TERMS = [

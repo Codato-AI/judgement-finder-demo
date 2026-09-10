@@ -12,18 +12,18 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .config import settings
-from .db.database import engine, get_db, Base
-from .db.models import CaseLaw, ModelTestResult
-from .pipeline.ingestion import load_dataset, row_to_dict
-from .pipeline.anonymizer import anonymize
-from .pipeline.document_creator import create_document
-from .llm.groq_client import chat
-from .llm.model_tester import run_model_test, MODELS
-from .llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-from .rag.embedder import embed_one, embed
-from .rag.vector_store import add_vector, add_vectors_batch, search, store_size
-from .rag.finder import find_similar
+from config import settings
+from db.database import engine, get_db, Base
+from db.models import CaseLaw, ModelTestResult
+from pipeline.ingestion import load_dataset, row_to_dict
+from pipeline.anonymizer import anonymize
+from pipeline.document_creator import create_document
+from llm.groq_client import chat
+from llm.model_tester import run_model_test, MODELS
+from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from rag.embedder import embed_one, embed
+from rag.vector_store import add_vector, add_vectors_batch, search, store_size, remove_vector
+from rag.finder import find_similar
 
 
 @asynccontextmanager
@@ -78,64 +78,104 @@ class BulkIngestResponse(BaseModel):
 def _process_row(row_dict: dict, db: Session) -> CaseLaw | None:
     text = row_dict.get("text", "")
     if len(text) < 50:
+        print(f"DEBUG: Skipping row - text too short ({len(text)} chars)")
         return None
 
-    known_names = [
-        n for n in [row_dict.get("petitioner"), row_dict.get("respondent"), row_dict.get("judges")]
-        if n and len(n) > 2
-    ]
+    # Create savepoint for this row
+    sp = db.begin_nested()
+    try:
+        known_names = [
+            n for n in [row_dict.get("petitioner"), row_dict.get("respondent"), row_dict.get("judges")]
+            if n and len(n) > 2
+        ]
 
-    anon = anonymize(text, known_names=known_names)
+        print(f"DEBUG: Starting anonymization for text length {len(text)}")
+        anon = anonymize(text, known_names=known_names)
+        print(f"DEBUG: Anonymization complete")
 
-    # Anonymize structured fields too
-    anon_petitioner = "John Doe"
-    anon_respondent = "Jane Doe"
-    anon_judges = "Honourable Bench"
+        # Anonymize structured fields too
+        anon_petitioner = "John Doe"
+        anon_respondent = "Jane Doe"
+        anon_judges = "Honourable Bench"
 
-    case = CaseLaw(
-        original_case_no=row_dict.get("case_no") or None,
-        judgment_date=row_dict.get("date") or None,
-        subject=row_dict.get("subject") or None,
-        acts_cited=row_dict.get("acts") or None,
-        raw_text=text[:50000],
-        anonymized_text=anon.anonymized_text[:50000],
-        pii_map=anon.pii_map,
-    )
-    db.add(case)
-    db.flush()
+        case = CaseLaw(
+            original_case_no=row_dict.get("case_no") or None,
+            judgment_date=row_dict.get("date") or None,
+            subject=row_dict.get("subject") or None,
+            acts_cited=row_dict.get("acts") or None,
+            anonymized_text=anon.anonymized_text[:50000],
+        )
+        db.add(case)
+        db.flush()
+        print(f"DEBUG: Case created with ID {case.id}")
 
-    # Generate summary via best available model (Kimi K2 first, fallback to Llama)
-    summary = _generate_summary(anon.anonymized_text)
+        # Generate summary via best available model
+        print(f"DEBUG: Starting summary generation")
+        summary = _generate_summary(anon.anonymized_text)
+        print(f"DEBUG: Summary generated: {len(summary)} chars")
 
-    anon_case_data = {
-        "date": row_dict.get("date"),
-        "subject": row_dict.get("subject"),
-        "acts": row_dict.get("acts"),
-        "verdict": row_dict.get("verdict"),
-        "petitioner": anon_petitioner,
-        "respondent": anon_respondent,
-        "judges": anon_judges,
-    }
-    doc_path = create_document(case.id, anon_case_data, summary)
-    case.document_path = str(doc_path)
+        anon_case_data = {
+            "date": row_dict.get("date"),
+            "subject": row_dict.get("subject"),
+            "acts": row_dict.get("acts"),
+            "verdict": row_dict.get("verdict"),
+            "petitioner": anon_petitioner,
+            "respondent": anon_respondent,
+            "judges": anon_judges,
+        }
+        doc_path = create_document(case.id, anon_case_data, summary)
+        case.document_path = str(doc_path)
+        print(f"DEBUG: Document created at {doc_path}")
 
-    # Embed and store in vector store
-    embed_text = f"{row_dict.get('subject', '')} {anon.anonymized_text[:500]}"
-    vec = embed_one(embed_text)
-    faiss_pos = add_vector(case.id, vec)
-    case.has_embedding = True
-    case.faiss_index = faiss_pos
+        # Embed and store in vector store
+        print(f"DEBUG: Starting embedding generation")
+        embed_text = f"{row_dict.get('subject', '')} {anon.anonymized_text[:500]}"
+        vec = embed_one(embed_text)
+        faiss_pos = add_vector(case.id, vec)
+        case.has_embedding = True
+        case.faiss_index = faiss_pos
+        print(f"DEBUG: Embedding added at position {faiss_pos}")
 
-    return case
+        # Commit savepoint on success
+        sp.commit()
+        return case
+    except Exception as e:
+        # Rollback savepoint on failure
+        sp.rollback()
+        print(f"ERROR: Failed to process row: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+        # Cleanup: remove document and metadata files if case was created
+        if 'case' in locals() and case.id:
+            try:
+                from pathlib import Path
+                doc_path = Path(case.document_path) if case.document_path else None
+                meta_path = settings.documents_path() / f"case_{case.id:06d}_meta.json"
+
+                if doc_path and doc_path.exists():
+                    doc_path.unlink()
+                    print(f"DEBUG: Cleaned up document file for case {case.id}")
+                if meta_path.exists():
+                    meta_path.unlink()
+                    print(f"DEBUG: Cleaned up metadata file for case {case.id}")
+
+                # Remove FAISS entry
+                remove_vector(case.id)
+                print(f"DEBUG: Cleaned up FAISS entry for case {case.id}")
+            except Exception as cleanup_err:
+                print(f"ERROR: Cleanup failed for case {case.id}: {cleanup_err}")
+
+        return None
 
 
-def _generate_summary(anonymized_text: str, model_id: str = "moonshotai/kimi-k2") -> str:
+def _generate_summary(anonymized_text: str, model_id: str = "qwen/qwen3.6-27b") -> str:
     truncated = anonymized_text[:6000]
     user_msg = USER_PROMPT_TEMPLATE.format(anonymized_text=truncated)
     resp = chat(model_id, SYSTEM_PROMPT, user_msg, max_tokens=1200)
     if resp["error"] or not resp["text"]:
-        # Fallback to Llama if Kimi K2 fails
-        resp = chat("llama-3.3-70b-versatile", SYSTEM_PROMPT, user_msg, max_tokens=1200)
+        # Fallback to GPT OSS if Qwen fails
+        resp = chat("openai/gpt-oss-20b", SYSTEM_PROMPT, user_msg, max_tokens=1200)
     return resp["text"] or "[Summary generation failed]"
 
 
@@ -152,19 +192,26 @@ async def bulk_ingest(
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path.write_bytes(await file.read())
 
+    print(f"DEBUG: Loading CSV from {tmp_path}")
     pipeline_df, test_df = load_dataset(tmp_path)
+    print(f"DEBUG: Pipeline rows: {len(pipeline_df)}, Test rows: {len(test_df)}")
+    print(f"DEBUG: Pipeline columns: {list(pipeline_df.columns)}")
 
     ingested = 0
     skipped = 0
-    for _, row in pipeline_df.iterrows():
+    for idx, row in pipeline_df.iterrows():
         row_dict = row_to_dict(row)
+        print(f"DEBUG: Processing row {idx}, text length: {len(row_dict.get('text', ''))}")
         case = _process_row(row_dict, db)
         if case:
             ingested += 1
+            print(f"DEBUG: Successfully ingested case {idx}")
         else:
             skipped += 1
+            print(f"DEBUG: Skipped case {idx}")
 
     db.commit()
+    print(f"DEBUG: Final count - ingested: {ingested}, skipped: {skipped}")
 
     return BulkIngestResponse(
         ingested=ingested,
@@ -248,18 +295,26 @@ class FinderRequest(BaseModel):
 
 @app.post("/api/finder/search")
 def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
+    print(f"DEBUG: Search request received - query_id: {id(req)}, query_length: {len(req.query)}, top_k: {req.top_k}")
+
     if not req.query.strip():
         raise HTTPException(400, "Query cannot be empty")
 
+    print(f"DEBUG: Calling find_similar...")
     hits = find_similar(req.query, top_k=req.top_k)
+    print(f"DEBUG: find_similar returned {len(hits)} hits: {hits}")
+
     if not hits:
         return {"results": [], "message": "No cases indexed yet. Run bulk ingestion first."}
 
     results = []
     for hit in hits:
+        print(f"DEBUG: Looking up case ID {hit['case_id']}")
         case = db.query(CaseLaw).filter(CaseLaw.id == hit["case_id"]).first()
         if not case:
+            print(f"DEBUG: Case {hit['case_id']} not found in database")
             continue
+        print(f"DEBUG: Found case {case.id}")
         results.append({
             "case_id": case.id,
             "ks_id": f"KS-{case.id:06d}",
@@ -271,6 +326,7 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
             "has_document": bool(case.document_path),
         })
 
+    print(f"DEBUG: Returning {len(results)} results")
     return {"results": results, "query": req.query}
 
 

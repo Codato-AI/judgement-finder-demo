@@ -1,7 +1,7 @@
 """Lazy-loaded sentence-transformer embedder."""
 from sentence_transformers import SentenceTransformer
 import numpy as np
-from ..config import settings
+from config import settings
 
 _model: SentenceTransformer | None = None
 

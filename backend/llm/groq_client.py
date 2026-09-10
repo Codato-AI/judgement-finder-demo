@@ -1,6 +1,6 @@
 import time
 from groq import Groq
-from ..config import settings
+from config import settings
 
 _client: Groq | None = None
 

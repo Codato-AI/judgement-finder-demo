@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy import String, Text, DateTime, Float, JSON, Integer
 from sqlalchemy.orm import Mapped, mapped_column
-from .database import Base
+from db.database import Base
 
 
 class CaseLaw(Base):

@@ -1,6 +1,6 @@
 """Judgement Finder: embed user query, retrieve top-N similar cases."""
-from .embedder import embed_one
-from .vector_store import search
+from rag.embedder import embed_one
+from rag.vector_store import search
 
 
 def find_similar(query: str, top_k: int = 5) -> list[dict]:

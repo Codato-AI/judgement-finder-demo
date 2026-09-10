@@ -1,17 +1,52 @@
-# Secrets
-backend/.env
+# Environment & Secrets (API Keys)
 .env
+.env.*
+backend/.env
+frontend/.env
 
-# Python
+# Python Runtime & Virtual Environments
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
 venv/
+env/
+.pytest_cache/
 
-# Node
+# Node & Frontend Build Outputs
 frontend/node_modules/
 frontend/dist/
+frontend/build/
+frontend/.vite/
 
-# OS
+# Operating System & IDE Files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Vector Store & Runtime Artifacts
+*.faiss
+*.npy
+backend/storage/faiss_index/*
+!backend/storage/faiss_index/.gitkeep
+storage/faiss_index/*
+!storage/faiss_index/.gitkeep
+
+# Generated Document Summaries & Metadata
+backend/storage/documents/*
+!backend/storage/documents/.gitkeep
+storage/documents/*
+!storage/documents/.gitkeep
+
+# Uploaded Case Data & PDFs
+backend/data/*
+!backend/data/.gitkeep
+data/*
+!data/.gitkeep

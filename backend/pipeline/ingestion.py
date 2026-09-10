@@ -39,7 +39,18 @@ def load_dataset(csv_path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     Load CSV, normalise columns, split 80/20.
     Returns (pipeline_df, test_df).
     """
-    df = pd.read_csv(csv_path, low_memory=False)
+    # Try different CSV reading strategies to handle malformed files
+    try:
+        df = pd.read_csv(csv_path, low_memory=False, on_bad_lines='skip')
+    except TypeError:
+        # Fallback for older pandas versions
+        df = pd.read_csv(csv_path, low_memory=False, error_bad_lines=False, warn_bad_lines=True)
+    except Exception as e:
+        # If that fails, try with more permissive settings
+        try:
+            df = pd.read_csv(csv_path, low_memory=False, engine='python', on_bad_lines='skip')
+        except TypeError:
+            df = pd.read_csv(csv_path, low_memory=False, engine='python', error_bad_lines=False, warn_bad_lines=True)
     df = df.dropna(how="all").reset_index(drop=True)
 
     # Build normalised dataframe

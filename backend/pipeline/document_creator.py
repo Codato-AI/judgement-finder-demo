@@ -5,7 +5,7 @@ Documents are stored locally under DOCUMENTS_DIR.
 import json
 from datetime import datetime
 from pathlib import Path
-from ..config import settings
+from config import settings
 
 
 _TEMPLATE = """\
