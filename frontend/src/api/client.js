@@ -31,6 +31,18 @@ export const api = {
     })
   },
 
+  ingestPdf: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return fetch(`${BASE}/ingest/pdf`, { method: 'POST', body: form }).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail || 'PDF ingest failed')
+      }
+      return res.json()
+    })
+  },
+
   finderSearch: (query, top_k = 5) =>
     request('/finder/search', {
       method: 'POST',

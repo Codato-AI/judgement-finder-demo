@@ -1,17 +1,16 @@
 """
 Runs anonymized case text through multiple Groq-hosted LLMs and scores each output.
-Models tested: Kimi K2, Llama 3.3 70B, Gemma 2 9B, DeepSeek R1, Qwen QwQ 32B, Mixtral 8x7B.
+Models tested: whatever is currently live on the Groq account (checked via client.models.list()).
 """
 import re
 from llm.groq_client import chat
 from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from pipeline.pdf_extractor import strip_thinking
 
 MODELS = [
-    {"id": "qwen/qwen3.6-27b", "label": "Qwen 3.6 27B (Alibaba)"},
+    {"id": "qwen/qwen3.8-27b", "label": "Qwen 3.8 27B (Alibaba)"},
     {"id": "openai/gpt-oss-20b", "label": "GPT OSS 20B (OpenAI)"},
     {"id": "openai/gpt-oss-120b", "label": "GPT OSS 120B (OpenAI)"},
-    {"id": "groq/compound", "label": "Compound (Groq)"},
-    {"id": "groq/compound-mini", "label": "Compound Mini (Groq)"},
 ]
 
 _LEGAL_TERMS = [
@@ -129,16 +128,17 @@ def run_model_test(
 
     results = []
     for model in models:
-        resp = chat(model["id"], SYSTEM_PROMPT, user_msg, max_tokens=1200)
+        resp = chat(model["id"], SYSTEM_PROMPT, user_msg, max_tokens=2500)
+        summary_text = strip_thinking(resp["text"]) if resp["text"] else resp["text"]
         if resp["error"]:
             scores = {k: None for k in ["completeness", "pii_safety", "readability", "structure", "legal_terms", "total"]}
         else:
-            scores = score_output(resp["text"], known_names)
+            scores = score_output(summary_text, known_names)
 
         results.append({
             "model_id": model["id"],
             "model_label": model["label"],
-            "generated_summary": resp["text"],
+            "generated_summary": summary_text,
             "latency_ms": resp["latency_ms"],
             "tokens_used": resp["tokens_used"],
             "error": resp["error"],
