@@ -25,6 +25,17 @@ class CaseLaw(Base):
     ingestion_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class CaseChunk(Base):
+    """One searchable text window of a judgment. FAISS stores one vector per chunk,
+    keyed by this row's id; search merges a case's chunk hits back into one result."""
+    __tablename__ = "case_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    case_id: Mapped[int] = mapped_column(Integer, index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)  # position within the judgment
+    chunk_text: Mapped[str] = mapped_column(Text)
+
+
 class ModelTestResult(Base):
     __tablename__ = "model_test_results"
 

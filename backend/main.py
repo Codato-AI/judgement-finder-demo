@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from config import settings
-from db.database import engine, get_db, Base
+from db.database import engine, get_db, Base, SessionLocal
 from db.models import CaseLaw, ModelTestResult, IngestionLog
 from pipeline.ingestion import load_dataset, row_to_dict
 from pipeline.anonymizer import anonymize
@@ -25,8 +25,9 @@ from pipeline.pdf_extractor import extract_text_from_pdf, extract_metadata_via_l
 from llm.groq_client import chat
 from llm.model_tester import run_model_test, MODELS
 from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-from rag.embedder import embed_one, embed
-from rag.vector_store import add_vector, add_vectors_batch, search, store_size, remove_vector
+from rag.indexer import index_case
+from rag.vector_store import store_size, remove_vectors
+from rag import keyword_search
 from rag.finder import find_similar
 
 
@@ -35,6 +36,8 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     settings.documents_path()
     settings.vector_store_path()
+    with SessionLocal() as db:
+        keyword_search.ensure_fts_table(db)
     yield
 
 
@@ -96,6 +99,7 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         return None, f"Text too short ({len(text)} chars)"
 
     # Create savepoint for this row so a mid-row failure rolls back cleanly
+    chunk_ids: list[int] = []
     sp = db.begin_nested()
     try:
         known_names = [
@@ -138,12 +142,9 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         doc_path = create_document(case.id, anon_case_data, summary)
         case.document_path = str(doc_path)
 
-        # Embed and store in vector store
-        embed_text = f"{row_dict.get('subject', '')} {anon.anonymized_text[:500]}"
-        vec = embed_one(embed_text)
-        faiss_pos = add_vector(case.id, vec)
-        case.has_embedding = True
-        case.faiss_index = faiss_pos
+        # Chunk, embed, and index every window of the judgment for search
+        chunk_ids = index_case(case, db)
+        case.has_embedding = bool(chunk_ids)
 
         # Commit savepoint on success
         sp.commit()
@@ -164,8 +165,8 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
                 if meta_path.exists():
                     meta_path.unlink()
 
-                # Remove FAISS entry
-                remove_vector(case.id)
+                # Remove this case's chunk vectors from FAISS (DB rows already rolled back)
+                remove_vectors(chunk_ids)
             except Exception:
                 logger.exception("Cleanup failed for case %s", case.id)
 
@@ -352,10 +353,12 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
     if not req.query.strip():
         raise HTTPException(400, "Query cannot be empty")
 
-    hits = find_similar(req.query, top_k=req.top_k)
+    hits = find_similar(req.query, db, top_k=req.top_k)
 
     if not hits:
-        return {"results": [], "message": "No cases indexed yet. Run bulk ingestion first."}
+        if store_size() == 0:
+            return {"results": [], "message": "No cases indexed yet. Run bulk ingestion first."}
+        return {"results": [], "message": "No relevant cases found for this query."}
 
     results = []
     for hit in hits:
@@ -369,7 +372,7 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
             "date": case.judgment_date,
             "subject": case.subject,
             "acts_cited": case.acts_cited,
-            "snippet": (case.anonymized_text or "")[:400] + "...",
+            "snippet": hit["snippet"][:500],  # the actual matching chunk
             "has_document": bool(case.document_path),
         })
 
