@@ -4,7 +4,7 @@ FastAPI app exposing ingestion pipeline, judgement finder, and LLM model tester.
 """
 from contextlib import asynccontextmanager
 from pathlib import Path
-import asyncio
+import uuid
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,10 +14,11 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db.database import engine, get_db, Base
-from db.models import CaseLaw, ModelTestResult
+from db.models import CaseLaw, ModelTestResult, IngestionLog
 from pipeline.ingestion import load_dataset, row_to_dict
 from pipeline.anonymizer import anonymize
 from pipeline.document_creator import create_document
+from pipeline.pdf_extractor import extract_text_from_pdf, extract_metadata_via_llm, strip_thinking
 from llm.groq_client import chat
 from llm.model_tester import run_model_test, MODELS
 from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -75,13 +76,23 @@ class BulkIngestResponse(BaseModel):
     message: str
 
 
-def _process_row(row_dict: dict, db: Session) -> CaseLaw | None:
+def _safe_upload_path(filename: str, expected_ext: str) -> Path:
+    """Store an upload under a random UUID name, keeping only the validated extension.
+    Prevents path traversal / overwrite via attacker-controlled filenames (SEC-02)."""
+    if not filename.lower().endswith(expected_ext):
+        raise HTTPException(400, f"Only {expected_ext} files are accepted")
+    data_dir = settings.data_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir / f"{uuid.uuid4().hex}{expected_ext}"
+
+
+def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
+    """Process one row atomically. Returns (case, error_message)."""
     text = row_dict.get("text", "")
     if len(text) < 50:
-        print(f"DEBUG: Skipping row - text too short ({len(text)} chars)")
-        return None
+        return None, f"Text too short ({len(text)} chars)"
 
-    # Create savepoint for this row
+    # Create savepoint for this row so a mid-row failure rolls back cleanly
     sp = db.begin_nested()
     try:
         known_names = [
@@ -93,7 +104,7 @@ def _process_row(row_dict: dict, db: Session) -> CaseLaw | None:
         anon = anonymize(text, known_names=known_names)
         print(f"DEBUG: Anonymization complete")
 
-        # Anonymize structured fields too
+        # Placeholder names for the anonymized document (real names are never surfaced)
         anon_petitioner = "John Doe"
         anon_respondent = "Jane Doe"
         anon_judges = "Honourable Bench"
@@ -103,7 +114,10 @@ def _process_row(row_dict: dict, db: Session) -> CaseLaw | None:
             judgment_date=row_dict.get("date") or None,
             subject=row_dict.get("subject") or None,
             acts_cited=row_dict.get("acts") or None,
+            raw_text=text[:50000],
             anonymized_text=anon.anonymized_text[:50000],
+            pii_map=anon.pii_map,
+            ingestion_status="success",
         )
         db.add(case)
         db.flush()
@@ -138,7 +152,7 @@ def _process_row(row_dict: dict, db: Session) -> CaseLaw | None:
 
         # Commit savepoint on success
         sp.commit()
-        return case
+        return case, ""
     except Exception as e:
         # Rollback savepoint on failure
         sp.rollback()
@@ -149,7 +163,6 @@ def _process_row(row_dict: dict, db: Session) -> CaseLaw | None:
         # Cleanup: remove document and metadata files if case was created
         if 'case' in locals() and case.id:
             try:
-                from pathlib import Path
                 doc_path = Path(case.document_path) if case.document_path else None
                 meta_path = settings.documents_path() / f"case_{case.id:06d}_meta.json"
 
@@ -166,17 +179,19 @@ def _process_row(row_dict: dict, db: Session) -> CaseLaw | None:
             except Exception as cleanup_err:
                 print(f"ERROR: Cleanup failed for case {case.id}: {cleanup_err}")
 
-        return None
+        return None, str(e)
 
 
-def _generate_summary(anonymized_text: str, model_id: str = "qwen/qwen3.6-27b") -> str:
+def _generate_summary(anonymized_text: str, model_id: str = "groq/compound") -> str:
     truncated = anonymized_text[:6000]
     user_msg = USER_PROMPT_TEMPLATE.format(anonymized_text=truncated)
-    resp = chat(model_id, SYSTEM_PROMPT, user_msg, max_tokens=1200)
+    resp = chat(model_id, SYSTEM_PROMPT, user_msg, max_tokens=1500)
     if resp["error"] or not resp["text"]:
-        # Fallback to GPT OSS if Qwen fails
-        resp = chat("openai/gpt-oss-20b", SYSTEM_PROMPT, user_msg, max_tokens=1200)
-    return resp["text"] or "[Summary generation failed]"
+        resp = chat("groq/compound-mini", SYSTEM_PROMPT, user_msg, max_tokens=1500)
+        if resp["error"] or not resp["text"]:
+            # Qwen needs extra tokens to fit its <think> reasoning block
+            resp = chat("qwen/qwen3.6-27b", SYSTEM_PROMPT, user_msg, max_tokens=3500)
+    return strip_thinking(resp["text"] or "") or "[Summary generation failed]"
 
 
 @app.post("/api/ingest/bulk", response_model=BulkIngestResponse)
@@ -185,11 +200,7 @@ async def bulk_ingest(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(400, "Only CSV files are accepted")
-
-    tmp_path = settings.data_path() / file.filename
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _safe_upload_path(file.filename, ".csv")
     tmp_path.write_bytes(await file.read())
 
     print(f"DEBUG: Loading CSV from {tmp_path}")
@@ -198,27 +209,86 @@ async def bulk_ingest(
     print(f"DEBUG: Pipeline columns: {list(pipeline_df.columns)}")
 
     ingested = 0
-    skipped = 0
+    failed = 0
+    errors = []
     for idx, row in pipeline_df.iterrows():
         row_dict = row_to_dict(row)
         print(f"DEBUG: Processing row {idx}, text length: {len(row_dict.get('text', ''))}")
-        case = _process_row(row_dict, db)
+        case, error_msg = _process_row(row_dict, db)
         if case:
             ingested += 1
             print(f"DEBUG: Successfully ingested case {idx}")
         else:
-            skipped += 1
-            print(f"DEBUG: Skipped case {idx}")
+            failed += 1
+            errors.append(f"Row {idx}: {error_msg or 'Unknown error'}")
+            print(f"DEBUG: Failed case {idx}: {error_msg}")
 
+    status = "success" if failed == 0 else "partial" if ingested > 0 else "failed"
+    db.add(IngestionLog(
+        filename=file.filename,
+        file_type="csv",
+        status=status,
+        cases_processed=ingested + failed,
+        cases_failed=failed,
+        error_message="\n".join(errors[:10]) if errors else None,
+    ))
     db.commit()
-    print(f"DEBUG: Final count - ingested: {ingested}, skipped: {skipped}")
+    print(f"DEBUG: Final count - ingested: {ingested}, failed: {failed}")
 
     return BulkIngestResponse(
         ingested=ingested,
         test_set_size=len(test_df),
-        skipped=skipped,
-        message=f"Ingested {ingested} cases into pipeline. {len(test_df)} cases reserved for LLM testing.",
+        skipped=failed,
+        message=f"Ingested {ingested} cases into pipeline. {failed} failed. {len(test_df)} cases reserved for LLM testing.",
     )
+
+
+class PdfIngestResponse(BaseModel):
+    success: bool
+    case_id: int | None
+    message: str
+
+
+@app.post("/api/ingest/pdf", response_model=PdfIngestResponse)
+async def ingest_pdf(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    tmp_path = _safe_upload_path(file.filename, ".pdf")
+    tmp_path.write_bytes(await file.read())
+
+    print(f"DEBUG: Processing PDF from {tmp_path}")
+    raw_text = extract_text_from_pdf(tmp_path)
+    if not raw_text or len(raw_text) < 50:
+        _log_ingestion(db, file.filename, "failed", "Could not extract sufficient text from PDF")
+        db.commit()
+        raise HTTPException(400, "Could not extract sufficient text from PDF")
+
+    print(f"DEBUG: Extracted {len(raw_text)} chars; extracting metadata via LLM...")
+    metadata = extract_metadata_via_llm(raw_text)
+    if not metadata:
+        _log_ingestion(db, file.filename, "failed", "Metadata extraction failed")
+        db.commit()
+        raise HTTPException(422, "Could not extract case metadata from PDF")
+
+    row_dict = {"text": raw_text, **metadata}
+    case, error_msg = _process_row(row_dict, db)
+    if not case:
+        _log_ingestion(db, file.filename, "failed", error_msg or "Processing failed")
+        db.commit()
+        return PdfIngestResponse(success=False, case_id=None, message=f"Failed to process case: {error_msg}")
+
+    _log_ingestion(db, file.filename, "success", None)
+    db.commit()
+    return PdfIngestResponse(success=True, case_id=case.id, message="Successfully ingested PDF case.")
+
+
+def _log_ingestion(db: Session, filename: str, status: str, error: str | None):
+    db.add(IngestionLog(
+        filename=filename, file_type="pdf", status=status,
+        cases_processed=1, cases_failed=0 if status == "success" else 1,
+        error_message=error,
+    ))
 
 
 # ─── Cases ────────────────────────────────────────────────────────────────────
@@ -235,6 +305,7 @@ def list_cases(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
             "subject": c.subject,
             "has_document": bool(c.document_path),
             "has_embedding": c.has_embedding,
+            "ingestion_status": c.ingestion_status,
             "ingested_at": c.ingested_at.isoformat(),
         }
         for c in cases
@@ -256,6 +327,8 @@ def get_case(case_id: int, db: Session = Depends(get_db)):
         "anonymized_text": case.anonymized_text,
         "document_path": case.document_path,
         "has_embedding": case.has_embedding,
+        "ingestion_status": case.ingestion_status,
+        "ingestion_error": case.ingestion_error,
         "ingested_at": case.ingested_at.isoformat(),
     }
 
@@ -407,3 +480,23 @@ def list_model_results(case_id: int | None = None, db: Session = Depends(get_db)
 @app.get("/api/models/available")
 def available_models():
     return {"models": MODELS}
+
+
+# ─── Ingestion Logs ───────────────────────────────────────────────────────────
+
+@app.get("/api/ingestion/logs")
+def list_ingestion_logs(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
+    logs = db.query(IngestionLog).order_by(IngestionLog.created_at.desc()).offset(skip).limit(limit).all()
+    return [
+        {
+            "id": log.id,
+            "filename": log.filename,
+            "file_type": log.file_type,
+            "status": log.status,
+            "cases_processed": log.cases_processed,
+            "cases_failed": log.cases_failed,
+            "error_message": log.error_message,
+            "created_at": log.created_at.isoformat(),
+        }
+        for log in logs
+    ]

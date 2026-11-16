@@ -73,7 +73,7 @@ def create_document(
 ) -> Path:
     """
     Write a markdown summary document and return its path.
-    case_data keys: date, petitioner, respondent, judges, subject, acts, verdict
+    case_data keys: date, petitioner, respondent, judges, subject, acts, verdict (all anonymized)
     """
     doc_dir = settings.documents_path()
     doc_path = doc_dir / f"case_{case_id:06d}_summary.md"

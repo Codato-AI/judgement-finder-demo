@@ -31,7 +31,9 @@ export default function IngestionPipeline() {
     setIngestStatus('processing')
     setIngestResult(null)
     try {
-      const result = await api.bulkIngest(file)
+      const result = file.name.toLowerCase().endsWith('.pdf')
+        ? await api.ingestPdf(file)
+        : await api.bulkIngest(file)
       setIngestResult(result)
       setIngestStatus('done')
       loadCases()
@@ -76,14 +78,14 @@ export default function IngestionPipeline() {
           className="border-2 border-dashed border-slate-700 rounded-lg p-8 text-center cursor-pointer hover:border-navy-500 transition-colors"
           onClick={() => inputRef.current?.click()}
         >
-          <input ref={inputRef} type="file" accept=".csv" className="hidden" onChange={handleFile} />
+          <input ref={inputRef} type="file" accept=".csv,.pdf" className="hidden" onChange={handleFile} />
           {file ? (
             <p className="text-emerald-400 font-medium">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>
           ) : (
             <>
               <Upload size={32} className="mx-auto text-slate-600 mb-2" />
-              <p className="text-slate-400">Click to select a CSV file</p>
-              <p className="text-slate-600 text-xs mt-1">SC judgments dataset (Kaggle format)</p>
+              <p className="text-slate-400">Click to select a CSV or PDF file</p>
+              <p className="text-slate-600 text-xs mt-1">SC judgments dataset (CSV) or a single case document (PDF)</p>
             </>
           )}
         </div>
@@ -104,11 +106,18 @@ export default function IngestionPipeline() {
             <div className="flex items-center gap-2 text-emerald-400 font-semibold mb-2">
               <CheckCircle size={16} /> Pipeline complete
             </div>
-            <div className="grid grid-cols-3 gap-4 text-sm">
-              <div><p className="text-slate-400">Ingested</p><p className="text-white font-bold">{ingestResult.ingested}</p></div>
-              <div><p className="text-slate-400">Test Set</p><p className="text-white font-bold">{ingestResult.test_set_size}</p></div>
-              <div><p className="text-slate-400">Skipped</p><p className="text-white font-bold">{ingestResult.skipped}</p></div>
-            </div>
+            {ingestResult.ingested !== undefined ? (
+              <div className="grid grid-cols-3 gap-4 text-sm">
+                <div><p className="text-slate-400">Ingested</p><p className="text-white font-bold">{ingestResult.ingested}</p></div>
+                <div><p className="text-slate-400">Test Set</p><p className="text-white font-bold">{ingestResult.test_set_size}</p></div>
+                <div><p className="text-slate-400">Skipped</p><p className="text-white font-bold">{ingestResult.skipped}</p></div>
+              </div>
+            ) : (
+              <div className="text-sm">
+                <p className="text-white font-medium">{ingestResult.message}</p>
+                {ingestResult.case_id && <p className="text-slate-400 mt-1">Case ID: {ingestResult.case_id}</p>}
+              </div>
+            )}
           </div>
         )}
         {ingestResult?.error && (
