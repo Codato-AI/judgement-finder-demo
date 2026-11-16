@@ -2,11 +2,14 @@
 PDF ingestion helpers: extract raw text via pdfplumber and structured metadata via an LLM.
 """
 import json
+import logging
 from pathlib import Path
 
 import pdfplumber
 
 from llm.groq_client import chat
+
+logger = logging.getLogger(__name__)
 
 _META_KEYS = {
     "case_no": ["case_no", "case_number", "caseno"],
@@ -98,8 +101,8 @@ Judgment Text:
 
     try:
         data = json.loads(_unfence_json(strip_thinking(resp["text"])))
-    except json.JSONDecodeError as e:
-        print(f"DEBUG: Failed to parse JSON from LLM: {e}\nRaw output: {resp['text']}")
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse metadata JSON from LLM. Raw output: %s", resp["text"])
         return {}
     return _normalize_metadata(data)
 

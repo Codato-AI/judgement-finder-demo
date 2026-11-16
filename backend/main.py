@@ -4,7 +4,10 @@ FastAPI app exposing ingestion pipeline, judgement finder, and LLM model tester.
 """
 from contextlib import asynccontextmanager
 from pathlib import Path
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,9 +103,7 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
             if n and len(n) > 2
         ]
 
-        print(f"DEBUG: Starting anonymization for text length {len(text)}")
         anon = anonymize(text, known_names=known_names)
-        print(f"DEBUG: Anonymization complete")
 
         # Placeholder names for the anonymized document (real names are never surfaced)
         anon_petitioner = "John Doe"
@@ -121,12 +122,9 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         )
         db.add(case)
         db.flush()
-        print(f"DEBUG: Case created with ID {case.id}")
 
         # Generate summary via best available model
-        print(f"DEBUG: Starting summary generation")
         summary = _generate_summary(anon.anonymized_text)
-        print(f"DEBUG: Summary generated: {len(summary)} chars")
 
         anon_case_data = {
             "date": row_dict.get("date"),
@@ -139,16 +137,13 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         }
         doc_path = create_document(case.id, anon_case_data, summary)
         case.document_path = str(doc_path)
-        print(f"DEBUG: Document created at {doc_path}")
 
         # Embed and store in vector store
-        print(f"DEBUG: Starting embedding generation")
         embed_text = f"{row_dict.get('subject', '')} {anon.anonymized_text[:500]}"
         vec = embed_one(embed_text)
         faiss_pos = add_vector(case.id, vec)
         case.has_embedding = True
         case.faiss_index = faiss_pos
-        print(f"DEBUG: Embedding added at position {faiss_pos}")
 
         # Commit savepoint on success
         sp.commit()
@@ -156,9 +151,7 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
     except Exception as e:
         # Rollback savepoint on failure
         sp.rollback()
-        print(f"ERROR: Failed to process row: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Failed to process row")
 
         # Cleanup: remove document and metadata files if case was created
         if 'case' in locals() and case.id:
@@ -168,16 +161,13 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
 
                 if doc_path and doc_path.exists():
                     doc_path.unlink()
-                    print(f"DEBUG: Cleaned up document file for case {case.id}")
                 if meta_path.exists():
                     meta_path.unlink()
-                    print(f"DEBUG: Cleaned up metadata file for case {case.id}")
 
                 # Remove FAISS entry
                 remove_vector(case.id)
-                print(f"DEBUG: Cleaned up FAISS entry for case {case.id}")
-            except Exception as cleanup_err:
-                print(f"ERROR: Cleanup failed for case {case.id}: {cleanup_err}")
+            except Exception:
+                logger.exception("Cleanup failed for case %s", case.id)
 
         return None, str(e)
 
@@ -203,25 +193,19 @@ async def bulk_ingest(
     tmp_path = _safe_upload_path(file.filename, ".csv")
     tmp_path.write_bytes(await file.read())
 
-    print(f"DEBUG: Loading CSV from {tmp_path}")
     pipeline_df, test_df = load_dataset(tmp_path)
-    print(f"DEBUG: Pipeline rows: {len(pipeline_df)}, Test rows: {len(test_df)}")
-    print(f"DEBUG: Pipeline columns: {list(pipeline_df.columns)}")
 
     ingested = 0
     failed = 0
     errors = []
     for idx, row in pipeline_df.iterrows():
         row_dict = row_to_dict(row)
-        print(f"DEBUG: Processing row {idx}, text length: {len(row_dict.get('text', ''))}")
         case, error_msg = _process_row(row_dict, db)
         if case:
             ingested += 1
-            print(f"DEBUG: Successfully ingested case {idx}")
         else:
             failed += 1
             errors.append(f"Row {idx}: {error_msg or 'Unknown error'}")
-            print(f"DEBUG: Failed case {idx}: {error_msg}")
 
     status = "success" if failed == 0 else "partial" if ingested > 0 else "failed"
     db.add(IngestionLog(
@@ -233,7 +217,6 @@ async def bulk_ingest(
         error_message="\n".join(errors[:10]) if errors else None,
     ))
     db.commit()
-    print(f"DEBUG: Final count - ingested: {ingested}, failed: {failed}")
 
     return BulkIngestResponse(
         ingested=ingested,
@@ -257,14 +240,12 @@ async def ingest_pdf(
     tmp_path = _safe_upload_path(file.filename, ".pdf")
     tmp_path.write_bytes(await file.read())
 
-    print(f"DEBUG: Processing PDF from {tmp_path}")
     raw_text = extract_text_from_pdf(tmp_path)
     if not raw_text or len(raw_text) < 50:
         _log_ingestion(db, file.filename, "failed", "Could not extract sufficient text from PDF")
         db.commit()
         raise HTTPException(400, "Could not extract sufficient text from PDF")
 
-    print(f"DEBUG: Extracted {len(raw_text)} chars; extracting metadata via LLM...")
     metadata = extract_metadata_via_llm(raw_text)
     if not metadata:
         _log_ingestion(db, file.filename, "failed", "Metadata extraction failed")
@@ -368,26 +349,19 @@ class FinderRequest(BaseModel):
 
 @app.post("/api/finder/search")
 def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
-    print(f"DEBUG: Search request received - query_id: {id(req)}, query_length: {len(req.query)}, top_k: {req.top_k}")
-
     if not req.query.strip():
         raise HTTPException(400, "Query cannot be empty")
 
-    print(f"DEBUG: Calling find_similar...")
     hits = find_similar(req.query, top_k=req.top_k)
-    print(f"DEBUG: find_similar returned {len(hits)} hits: {hits}")
 
     if not hits:
         return {"results": [], "message": "No cases indexed yet. Run bulk ingestion first."}
 
     results = []
     for hit in hits:
-        print(f"DEBUG: Looking up case ID {hit['case_id']}")
         case = db.query(CaseLaw).filter(CaseLaw.id == hit["case_id"]).first()
         if not case:
-            print(f"DEBUG: Case {hit['case_id']} not found in database")
             continue
-        print(f"DEBUG: Found case {case.id}")
         results.append({
             "case_id": case.id,
             "ks_id": f"KS-{case.id:06d}",
@@ -399,7 +373,6 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
             "has_document": bool(case.document_path),
         })
 
-    print(f"DEBUG: Returning {len(results)} results")
     return {"results": results, "query": req.query}
 
 
