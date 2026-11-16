@@ -182,15 +182,15 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         return None, str(e)
 
 
-def _generate_summary(anonymized_text: str, model_id: str = "groq/compound") -> str:
+def _generate_summary(anonymized_text: str, model_id: str = "openai/gpt-oss-120b") -> str:
     truncated = anonymized_text[:6000]
     user_msg = USER_PROMPT_TEMPLATE.format(anonymized_text=truncated)
     resp = chat(model_id, SYSTEM_PROMPT, user_msg, max_tokens=1500)
     if resp["error"] or not resp["text"]:
-        resp = chat("groq/compound-mini", SYSTEM_PROMPT, user_msg, max_tokens=1500)
+        resp = chat("openai/gpt-oss-20b", SYSTEM_PROMPT, user_msg, max_tokens=1500)
         if resp["error"] or not resp["text"]:
             # Qwen needs extra tokens to fit its <think> reasoning block
-            resp = chat("qwen/qwen3.6-27b", SYSTEM_PROMPT, user_msg, max_tokens=3500)
+            resp = chat("qwen/qwen3.8-27b", SYSTEM_PROMPT, user_msg, max_tokens=3500)
     return strip_thinking(resp["text"] or "") or "[Summary generation failed]"
 
 

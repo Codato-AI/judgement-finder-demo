@@ -88,11 +88,11 @@ Keys required:
 Judgment Text:
 {truncated}
 """
-    resp = chat("groq/compound-mini", "You are a helpful JSON extraction assistant.", prompt,
+    resp = chat("openai/gpt-oss-20b", "You are a helpful JSON extraction assistant.", prompt,
                 max_tokens=1024, temperature=0.1)
     if resp["error"] or not resp["text"]:
-        resp = chat("qwen/qwen3.6-27b", "You are a helpful JSON extraction assistant.", prompt,
-                    max_tokens=1024, temperature=0.1)
+        resp = chat("qwen/qwen3.8-27b", "You are a helpful JSON extraction assistant.", prompt,
+                    max_tokens=1536, temperature=0.1)
         if resp["error"] or not resp["text"]:
             return {}
 
