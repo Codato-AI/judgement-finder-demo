@@ -14,6 +14,7 @@ class CaseLaw(Base):
     acts_cited: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     anonymized_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     document_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     pii_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ingested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -141,6 +141,7 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         }
         doc_path = create_document(case.id, anon_case_data, summary)
         case.document_path = str(doc_path)
+        case.generated_summary = summary
 
         # Chunk, embed, and index every window of the judgment for search
         chunk_ids = index_case(case, db)
@@ -379,6 +380,7 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
             "date": case.judgment_date,
             "subject": case.subject,
             "acts_cited": case.acts_cited,
+            "summary": case.generated_summary,
             "snippet": hit["snippet"][:500],  # the actual matching chunk
             "has_document": bool(case.document_path),
         })

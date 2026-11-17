@@ -170,16 +170,22 @@ export default function JudgementFinder() {
                   </p>
                 )}
 
-                <div className={`overflow-hidden transition-all duration-300 ${expandedId === r.case_id ? 'max-h-96' : 'max-h-12'}`}>
-                  <p className="text-slate-300 text-sm leading-relaxed">{r.snippet}</p>
-                </div>
+                <p className="text-slate-300 text-sm leading-relaxed">
+                  {r.summary || 'No summary available for this case.'}
+                </p>
+
+                {expandedId === r.case_id && (
+                  <p className="text-slate-400 text-xs leading-relaxed mt-2 italic border-l-2 border-slate-700 pl-2">
+                    {r.snippet}
+                  </p>
+                )}
 
                 <div className="flex items-center gap-3 mt-3">
                   <button
                     className="text-xs text-navy-400 hover:text-navy-200 transition-colors"
                     onClick={() => setExpandedId(expandedId === r.case_id ? null : r.case_id)}
                   >
-                    {expandedId === r.case_id ? 'Show less' : 'Show snippet'}
+                    {expandedId === r.case_id ? 'Hide matching passage' : 'Show matching passage'}
                   </button>
                   {r.has_document && (
                     <a
