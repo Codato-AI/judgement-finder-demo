@@ -14,6 +14,7 @@ class CaseLaw(Base):
     acts_cited: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     anonymized_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     document_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     pii_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ingested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -23,6 +24,17 @@ class CaseLaw(Base):
     # Ingestion status tracking
     ingestion_status: Mapped[str] = mapped_column(String(50), default="pending")  # pending | success | failed
     ingestion_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CaseChunk(Base):
+    """One searchable text window of a judgment. FAISS stores one vector per chunk,
+    keyed by this row's id; search merges a case's chunk hits back into one result."""
+    __tablename__ = "case_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    case_id: Mapped[int] = mapped_column(Integer, index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)  # position within the judgment
+    chunk_text: Mapped[str] = mapped_column(Text)
 
 
 class ModelTestResult(Base):

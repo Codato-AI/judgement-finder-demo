@@ -250,37 +250,29 @@ def _cleanup_legacy_files():
         pass
 
 
-def add_vector(case_id: int, vector: np.ndarray) -> int:
-    """Add a single embedding. Returns FAISS position."""
-    global _vector_cache
-    with _lock:
-        idx = _get_index()
-        vec = vector.reshape(1, -1).astype(np.float32)
-        idx.add(vec)
-        pos = len(_id_map)
-        _id_map.append(case_id)
-        _vector_cache[case_id] = vector.copy()
-        _persist()
-        return pos
+def add_vector(item_id: int, vector: np.ndarray) -> int:
+    """Add a single embedding. Returns its FAISS position."""
+    return add_vectors_batch([item_id], vector.reshape(1, -1))[0]
 
 
-def add_vectors_batch(case_ids: list[int], vectors: np.ndarray) -> list[int]:
+def add_vectors_batch(item_ids: list[int], vectors: np.ndarray) -> list[int]:
+    """Add embeddings keyed by item_id (a chunk id). Returns FAISS positions."""
     global _vector_cache
     with _lock:
         idx = _get_index()
         vecs = vectors.astype(np.float32)
         start = len(_id_map)
         idx.add(vecs)
-        positions = list(range(start, start + len(case_ids)))
-        _id_map.extend(case_ids)
-        for case_id, vec in zip(case_ids, vectors):
-            _vector_cache[case_id] = vec.copy()
+        positions = list(range(start, start + len(item_ids)))
+        _id_map.extend(item_ids)
+        for item_id, vec in zip(item_ids, vectors):
+            _vector_cache[item_id] = vec.copy()
         _persist()
         return positions
 
 
 def search(query_vector: np.ndarray, top_k: int = 5) -> list[dict]:
-    """Returns list of {case_id, score} sorted by descending similarity."""
+    """Returns list of {id, score} sorted by descending similarity (id = chunk id)."""
     with _lock:
         idx = _get_index()
         if idx.ntotal == 0:
@@ -292,7 +284,7 @@ def search(query_vector: np.ndarray, top_k: int = 5) -> list[dict]:
         for score, pos in zip(scores[0], positions[0]):
             if pos == -1:
                 continue
-            results.append({"case_id": _id_map[pos], "score": float(round(score, 4))})
+            results.append({"id": _id_map[pos], "score": float(round(score, 4))})
         return results
 
 
@@ -380,69 +372,66 @@ def _cleanup_old_generations(current_generation: int):
         pass
 
 
-def remove_vector(case_id: int) -> bool:
-    """Remove a vector by case_id. Rebuilds index without that entry."""
+def remove_vectors(item_ids: list[int]) -> bool:
+    """Remove all vectors whose id is in item_ids. Rebuilds the index from the retained
+    vectors in one pass. Returns True on success (or if nothing matched)."""
     global _index, _id_map, _vector_cache
     with _lock:
         try:
             idx = _get_index()
-            if case_id not in _id_map:
+            remove_set = set(item_ids)
+            retained = [(pos, iid) for pos, iid in enumerate(_id_map) if iid not in remove_set]
+
+            # Nothing to remove
+            if len(retained) == len(_id_map):
+                return True
+
+            # Ensure every retained id has a cached vector, reconstructing from the index if not
+            for pos, iid in retained:
+                if iid not in _vector_cache:
+                    try:
+                        _vector_cache[iid] = idx.reconstruct(pos).copy()
+                    except (ValueError, RuntimeError):
+                        return False
+
+            # Rebuild from retained vectors
+            new_index = faiss.IndexFlatIP(_DIMENSION)
+            new_id_map = []
+            for _, iid in retained:
+                new_index.add(_vector_cache[iid].reshape(1, -1).astype(np.float32))
+                new_id_map.append(iid)
+
+            if new_index.ntotal != len(new_id_map):
                 return False
 
-            # Find position of case_id
-            pos = _id_map.index(case_id)
+            _index = new_index
+            _id_map = new_id_map
+            for iid in remove_set:
+                _vector_cache.pop(iid, None)
 
-            # Rebuild index without that entry
-            if idx.ntotal > 1:
-                # Get all IDs except the one to remove
-                all_ids = _id_map.copy()
-                all_ids.pop(pos)
-
-                # Validate that all retained IDs have cached vectors
-                missing_vectors = [retained_id for retained_id in all_ids if retained_id not in _vector_cache]
-                if missing_vectors:
-                    # Try to reconstruct missing vectors from FAISS index
-                    for retained_id in missing_vectors:
-                        try:
-                            retained_pos = _id_map.index(retained_id)
-                            vec = idx.reconstruct(retained_pos)
-                            _vector_cache[retained_id] = vec.copy()
-                        except (ValueError, RuntimeError):
-                            # If we can't reconstruct, validation fails
-                            return False
-
-                # Final validation - ensure all retained IDs now have cached vectors
-                if not all(retained_id in _vector_cache for retained_id in all_ids):
-                    return False
-
-                # Rebuild FAISS index with retained vectors
-                _index = faiss.IndexFlatIP(_DIMENSION)
-                _id_map = []
-
-                # Re-add all retained vectors from cache
-                for retained_id in all_ids:
-                    vec = _vector_cache[retained_id].reshape(1, -1).astype(np.float32)
-                    _index.add(vec)
-                    _id_map.append(retained_id)
-
-                # Validate positional consistency between index and id_map
-                if _index.ntotal != len(_id_map):
-                    return False
-
-                # Remove from cache
-                _vector_cache.pop(case_id, None)
-
-                _persist()
-                return True
-            else:
-                # If only one vector, clear the index
-                _index = faiss.IndexFlatIP(_DIMENSION)
-                _id_map = []
-                _vector_cache.pop(case_id, None)
-                _persist()
-                return True
+            _persist()
+            return True
         except Exception:
             return False
+
+
+def remove_vector(item_id: int) -> bool:
+    """Remove a single vector by id. Rebuilds the index without it."""
+    return remove_vectors([item_id])
+
+
+def reset():
+    """Wipe the entire store (all generations on disk + in-memory state). For backfill."""
+    global _index, _id_map, _vector_cache, _generation
+    with _lock:
+        import shutil
+        vp = settings.vector_store_path()
+        if vp.exists():
+            shutil.rmtree(vp)
+        _index = None
+        _id_map = []
+        _vector_cache = {}
+        _generation = 0
 
 
 def store_size() -> int:

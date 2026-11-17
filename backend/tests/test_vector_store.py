@@ -83,7 +83,7 @@ def test_middle_vector_removal(temp_vector_store):
         # Verify searches resolve to correct case IDs
         query_vec = vec1
         results = vector_store.search(query_vec, top_k=2)
-        result_ids = [r["case_id"] for r in results]
+        result_ids = [r["id"] for r in results]
         assert 1 in result_ids, "Case ID 1 should be in search results"
         assert 3 in result_ids, "Case ID 3 should be in search results"
         assert 2 not in result_ids, "Case ID 2 should not be in search results after removal"
@@ -141,7 +141,7 @@ def test_cache_preservation_after_rebuild(temp_vector_store):
         # Verify search results are retained for remaining cases
         query_vec = vec1
         results = vector_store.search(query_vec, top_k=2)
-        result_ids = [r["case_id"] for r in results]
+        result_ids = [r["id"] for r in results]
         assert 1 in result_ids, "Case ID 1 should be in search results"
         assert 3 in result_ids, "Case ID 3 should be in search results"
         assert 2 not in result_ids, "Case ID 2 should not be in search results after removal"
@@ -292,7 +292,7 @@ def test_interrupted_write_consistency(temp_vector_store):
         # Perform search and verify all three cases are searchable
         query_vec = vec1
         results = vector_store.search(query_vec, top_k=3)
-        result_ids = [r["case_id"] for r in results]
+        result_ids = [r["id"] for r in results]
 
         # All three cases should be in search results
         assert 1 in result_ids, "Case ID 1 should be in search results after fallback"
@@ -324,7 +324,7 @@ def test_interrupted_write_consistency(temp_vector_store):
 
         # Verify search results after removal
         results = vector_store.search(query_vec, top_k=2)
-        result_ids = [r["case_id"] for r in results]
+        result_ids = [r["id"] for r in results]
 
         assert 1 in result_ids, "Case ID 1 should be in search results after removal"
         assert 3 in result_ids, "Case ID 3 should be in search results after removal"
@@ -391,13 +391,13 @@ def test_missing_directory_recovery(temp_vector_store):
 
     # Search with each known vector and verify the expected case ID
     results1 = vector_store.search(vec1, top_k=1)
-    assert results1[0]["case_id"] == 1, "Vector 1 should return case ID 1"
+    assert results1[0]["id"] == 1, "Vector 1 should return case ID 1"
 
     results2 = vector_store.search(vec2, top_k=1)
-    assert results2[0]["case_id"] == 2, "Vector 2 should return case ID 2"
+    assert results2[0]["id"] == 2, "Vector 2 should return case ID 2"
 
     results3 = vector_store.search(vec3, top_k=1)
-    assert results3[0]["case_id"] == 3, "Vector 3 should return case ID 3"
+    assert results3[0]["id"] == 3, "Vector 3 should return case ID 3"
 
     # Remove case ID 2
     result = vector_store.remove_vector(2)
@@ -413,7 +413,7 @@ def test_missing_directory_recovery(temp_vector_store):
 
     # Verify search results after removal
     results = vector_store.search(vec1, top_k=2)
-    result_ids = [r["case_id"] for r in results]
+    result_ids = [r["id"] for r in results]
 
     assert 1 in result_ids, "Case ID 1 should be in search results after removal"
     assert 3 in result_ids, "Case ID 3 should be in search results after removal"
@@ -499,13 +499,13 @@ def test_invalid_generation_fallback_recovery(temp_vector_store):
 
     # Verify all three case IDs are searchable
     results1 = vector_store.search(vec1, top_k=1)
-    assert results1[0]["case_id"] == 1, "Case ID 1 should be searchable"
+    assert results1[0]["id"] == 1, "Case ID 1 should be searchable"
 
     results2 = vector_store.search(vec2, top_k=1)
-    assert results2[0]["case_id"] == 2, "Case ID 2 should be searchable"
+    assert results2[0]["id"] == 2, "Case ID 2 should be searchable"
 
     results3 = vector_store.search(vec3, top_k=1)
-    assert results3[0]["case_id"] == 3, "Case ID 3 should be searchable"
+    assert results3[0]["id"] == 3, "Case ID 3 should be searchable"
 
     # Step 6: Verify mutation after recovery
     result = vector_store.remove_vector(2)
@@ -521,7 +521,7 @@ def test_invalid_generation_fallback_recovery(temp_vector_store):
 
     # Verify search results after removal
     results = vector_store.search(vec1, top_k=2)
-    result_ids = [r["case_id"] for r in results]
+    result_ids = [r["id"] for r in results]
 
     assert 1 in result_ids, "Case ID 1 should be in search results after removal"
     assert 3 in result_ids, "Case ID 3 should be in search results after removal"

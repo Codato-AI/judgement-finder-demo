@@ -50,3 +50,6 @@ backend/data/*
 !backend/data/.gitkeep
 data/*
 !data/.gitkeep
+
+# Retrieval eval harness - local only, not for GitHub
+backend/eval/
