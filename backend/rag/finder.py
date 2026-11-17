@@ -1,11 +1,42 @@
 """Judgement Finder: embed the query, retrieve matching chunks via both vector
 (semantic) and keyword (BM25) search, fuse the two rankings, merge back to cases.
 """
+import re
+
 from sqlalchemy.orm import Session
 
-from db.models import CaseChunk
+from db.models import CaseChunk, CaseLaw
 from rag.embedder import embed_one
 from rag import vector_store, keyword_search
+
+YEAR_RE = re.compile(r"\d{4}")
+
+
+def eligible_case_ids(
+    db: Session, year_from: int | None, year_to: int | None, acts_cited: str | None
+) -> set[int] | None:
+    """Cases matching the given filters, or None if no filters were given (meaning:
+    don't restrict). judgment_date is free text in inconsistent formats, but every
+    format seen has an unambiguous 4-digit year, so that's what's filtered on."""
+    if year_from is None and year_to is None and not acts_cited:
+        return None
+    query = db.query(CaseLaw.id, CaseLaw.judgment_date)
+    if acts_cited:
+        query = query.filter(CaseLaw.acts_cited.ilike(f"%{acts_cited}%"))
+    if year_from is None and year_to is None:
+        return {row.id for row in query.all()}
+    ids = set()
+    for row in query.all():
+        match = YEAR_RE.search(row.judgment_date or "")
+        if not match:
+            continue
+        year = int(match.group())
+        if year_from is not None and year < year_from:
+            continue
+        if year_to is not None and year > year_to:
+            continue
+        ids.add(row.id)
+    return ids
 
 # Chunks-per-case means we must over-fetch chunk hits to end up with top_k distinct cases.
 FANOUT = 8
@@ -34,10 +65,13 @@ def _rrf_fuse(*ranked_lists: list[dict]) -> dict[int, float]:
     return fused
 
 
-def find_similar(query: str, db: Session, top_k: int = 5) -> list[dict]:
+def find_similar(
+    query: str, db: Session, top_k: int = 5, allowed_case_ids: set[int] | None = None
+) -> list[dict]:
     """Return up to top_k distinct cases, each with its best-matching chunk as the
     snippet. Shape: [{case_id, score, snippet}], ordered by fused rank; score is the
-    raw cosine similarity for display, not the fused value used to pick the order."""
+    raw cosine similarity for display, not the fused value used to pick the order.
+    allowed_case_ids, if given, restricts results to that set (used by search filters)."""
     vec = embed_one(query)
     vector_hits = vector_store.search(vec, top_k=top_k * FANOUT)
     if not vector_hits or vector_hits[0]["score"] < MIN_VECTOR_SCORE:
@@ -59,6 +93,8 @@ def find_similar(query: str, db: Session, top_k: int = 5) -> list[dict]:
     for cid in chunk_ids:
         row = rows.get(cid)
         if row is None or row.case_id in best:
+            continue
+        if allowed_case_ids is not None and row.case_id not in allowed_case_ids:
             continue
         display_score = vector_score_by_chunk.get(cid, best_vector_score)
         best[row.case_id] = {"case_id": row.case_id, "score": display_score, "snippet": row.chunk_text}

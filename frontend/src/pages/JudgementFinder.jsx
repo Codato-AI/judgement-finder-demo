@@ -28,6 +28,9 @@ export default function JudgementFinder() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [expandedId, setExpandedId] = useState(null)
+  const [yearFrom, setYearFrom] = useState('')
+  const [yearTo, setYearTo] = useState('')
+  const [actsCited, setActsCited] = useState('')
 
   const search = async () => {
     if (!query.trim()) return
@@ -35,7 +38,12 @@ export default function JudgementFinder() {
     setError(null)
     setResults(null)
     try {
-      const data = await api.finderSearch(query, 5)
+      const filters = {
+        year_from: yearFrom ? Number(yearFrom) : null,
+        year_to: yearTo ? Number(yearTo) : null,
+        acts_cited: actsCited.trim() || null,
+      }
+      const data = await api.finderSearch(query, 5, filters)
       setResults(data)
     } catch (e) {
       setError(e.message)
@@ -80,6 +88,46 @@ export default function JudgementFinder() {
             {loading ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />}
             {loading ? 'Searching…' : 'Find Cases'}
           </button>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="card mb-4 flex flex-wrap items-end gap-4">
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">Court</label>
+          <select className="input" disabled value="Supreme Court of India">
+            <option>Supreme Court of India</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">Year from</label>
+          <input
+            type="number"
+            className="input w-28"
+            placeholder="1950"
+            value={yearFrom}
+            onChange={(e) => setYearFrom(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">Year to</label>
+          <input
+            type="number"
+            className="input w-28"
+            placeholder="2025"
+            value={yearTo}
+            onChange={(e) => setYearTo(e.target.value)}
+          />
+        </div>
+        <div className="flex-1 min-w-48">
+          <label className="block text-xs text-slate-400 mb-1">Acts cited contains</label>
+          <input
+            type="text"
+            className="input"
+            placeholder="e.g. Article 21"
+            value={actsCited}
+            onChange={(e) => setActsCited(e.target.value)}
+          />
         </div>
       </div>
 

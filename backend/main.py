@@ -28,7 +28,7 @@ from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from rag.indexer import index_case
 from rag.vector_store import store_size, remove_vectors
 from rag import keyword_search
-from rag.finder import find_similar
+from rag.finder import find_similar, eligible_case_ids
 
 
 @asynccontextmanager
@@ -346,6 +346,9 @@ def view_document(case_id: int, db: Session = Depends(get_db)):
 class FinderRequest(BaseModel):
     query: str
     top_k: int = 5
+    year_from: int | None = None
+    year_to: int | None = None
+    acts_cited: str | None = None
 
 
 @app.post("/api/finder/search")
@@ -353,7 +356,11 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
     if not req.query.strip():
         raise HTTPException(400, "Query cannot be empty")
 
-    hits = find_similar(req.query, db, top_k=req.top_k)
+    allowed_case_ids = eligible_case_ids(db, req.year_from, req.year_to, req.acts_cited)
+    if allowed_case_ids is not None and not allowed_case_ids:
+        return {"results": [], "message": "No cases match the selected filters."}
+
+    hits = find_similar(req.query, db, top_k=req.top_k, allowed_case_ids=allowed_case_ids)
 
     if not hits:
         if store_size() == 0:

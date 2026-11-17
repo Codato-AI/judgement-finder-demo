@@ -43,10 +43,10 @@ export const api = {
     })
   },
 
-  finderSearch: (query, top_k = 5) =>
+  finderSearch: (query, top_k = 5, filters = {}) =>
     request('/finder/search', {
       method: 'POST',
-      body: JSON.stringify({ query, top_k }),
+      body: JSON.stringify({ query, top_k, ...filters }),
     }),
 
   testModels: (case_id, model_ids = null) =>
