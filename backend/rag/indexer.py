@@ -28,9 +28,13 @@ def split_into_chunks(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
     return [c for c in chunks if c.strip()]
 
 
-def index_case(case: CaseLaw, db: Session) -> list[int]:
+def index_case(case: CaseLaw, db: Session, persist: bool = True) -> list[int]:
     """Chunk a case's anonymized text, persist CaseChunk rows, embed and add to FAISS.
-    Returns the chunk ids added (so a failed ingestion can remove them from FAISS)."""
+    Returns the chunk ids added (so a failed ingestion can remove them from FAISS).
+
+    persist=False skips the FAISS disk write for this case — pass this from a
+    bulk loader and call vector_store.flush() once at the end, otherwise every
+    case rewrites the whole index (see vector_store.add_vectors_batch)."""
     chunks = split_into_chunks(case.anonymized_text)
     if not chunks:
         return []
@@ -38,6 +42,6 @@ def index_case(case: CaseLaw, db: Session) -> list[int]:
     db.add_all(rows)
     db.flush()  # assigns row ids
     vecs = embed(chunks)
-    add_vectors_batch([r.id for r in rows], vecs)
+    add_vectors_batch([r.id for r in rows], vecs, persist=persist)
     keyword_search.index_chunks(db, rows)
     return [r.id for r in rows]

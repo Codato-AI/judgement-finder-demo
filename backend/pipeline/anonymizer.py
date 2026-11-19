@@ -14,7 +14,10 @@ def _get_nlp():
     global _nlp
     if _nlp is None:
         try:
-            _nlp = spacy.load("en_core_web_sm")
+            # Only the NER component is used below — tagger/parser/lemmatizer
+            # are dead weight for this pipeline, disabling them cuts memory
+            # and time per document for free.
+            _nlp = spacy.load("en_core_web_sm", disable=["tagger", "parser", "lemmatizer", "attribute_ruler"])
         except OSError:
             # Fallback: blank model with no NER — regex still runs
             _nlp = spacy.blank("en")
@@ -75,9 +78,12 @@ def anonymize(
             # Case-insensitive replacement
             text = re.sub(re.escape(name), placeholder, text, flags=re.IGNORECASE)
 
-    # 2. spaCy NER for remaining names and orgs/locs in text
+    # 2. spaCy NER for remaining names in text
     nlp = _get_nlp()
-    doc = nlp(text[:100_000])  # spaCy limit guard
+    # nlp.max_length (spaCy's own memory-safety ceiling, 1M chars by default)
+    # bounds a single document's NER memory use — real judgments never get
+    # close to it, this just stops a pathological upload from blowing up.
+    doc = nlp(text[:nlp.max_length])
 
     ner_replacements: list[tuple[int, int, str]] = []
     for ent in doc.ents:
@@ -85,14 +91,6 @@ def anonymize(
             placeholder = _person_placeholder(person_idx)
             person_idx += 1
             pii_map[placeholder] = ent.text
-            ner_replacements.append((ent.start_char, ent.end_char, placeholder))
-        elif ent.label_ in ("ORG",):
-            placeholder = "[ORGANIZATION]"
-            pii_map.setdefault(placeholder, ent.text)
-            ner_replacements.append((ent.start_char, ent.end_char, placeholder))
-        elif ent.label_ in ("GPE", "LOC", "FAC"):
-            placeholder = "[LOCATION]"
-            pii_map.setdefault(placeholder, ent.text)
             ner_replacements.append((ent.start_char, ent.end_char, placeholder))
 
     # Apply NER replacements in reverse order to preserve offsets

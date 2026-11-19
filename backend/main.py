@@ -26,7 +26,7 @@ from llm.groq_client import chat
 from llm.model_tester import run_model_test, MODELS
 from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from rag.indexer import index_case
-from rag.vector_store import store_size, remove_vectors
+from rag.vector_store import store_size, remove_vectors, flush as flush_vectors
 from rag import keyword_search
 from rag.finder import find_similar, eligible_case_ids
 
@@ -92,8 +92,12 @@ def _safe_upload_path(filename: str, expected_ext: str) -> Path:
     return data_dir / f"{uuid.uuid4().hex}{expected_ext}"
 
 
-def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
-    """Process one row atomically. Returns (case, error_message)."""
+def _process_row(row_dict: dict, db: Session, persist_vectors: bool = True) -> tuple[CaseLaw | None, str]:
+    """Process one row atomically. Returns (case, error_message).
+
+    persist_vectors=False skips the FAISS disk write for this row — pass this
+    when ingesting many rows in a loop and flush the vector store once at the
+    end (see bulk_ingest), otherwise every row rewrites the whole index."""
     text = row_dict.get("text", "")
     if len(text) < 50:
         return None, f"Text too short ({len(text)} chars)"
@@ -119,8 +123,8 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
             judgment_date=row_dict.get("date") or None,
             subject=row_dict.get("subject") or None,
             acts_cited=row_dict.get("acts") or None,
-            raw_text=text[:50000],
-            anonymized_text=anon.anonymized_text[:50000],
+            raw_text=text,
+            anonymized_text=anon.anonymized_text,
             pii_map=anon.pii_map,
             ingestion_status="success",
         )
@@ -144,7 +148,7 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         case.generated_summary = summary
 
         # Chunk, embed, and index every window of the judgment for search
-        chunk_ids = index_case(case, db)
+        chunk_ids = index_case(case, db, persist=persist_vectors)
         case.has_embedding = bool(chunk_ids)
 
         # Commit savepoint on success
@@ -202,12 +206,15 @@ async def bulk_ingest(
     errors = []
     for idx, row in pipeline_df.iterrows():
         row_dict = row_to_dict(row)
-        case, error_msg = _process_row(row_dict, db)
+        # Skip the per-row FAISS disk write (see vector_store.add_vectors_batch)
+        # and flush once after the whole file is in.
+        case, error_msg = _process_row(row_dict, db, persist_vectors=False)
         if case:
             ingested += 1
         else:
             failed += 1
             errors.append(f"Row {idx}: {error_msg or 'Unknown error'}")
+    flush_vectors()
 
     status = "success" if failed == 0 else "partial" if ingested > 0 else "failed"
     db.add(IngestionLog(

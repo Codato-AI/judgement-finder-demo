@@ -53,8 +53,6 @@ PAN, email addresses) has been replaced with neutral placeholders.
 | Placeholder | Type |
 |-------------|------|
 | John Doe / Jane Doe / Person A–H | Individual names |
-| [ORGANIZATION] | Company / institution names |
-| [LOCATION] | Cities, states, districts |
 | [AADHAAR] | Aadhaar numbers |
 | [PAN] | PAN card numbers |
 | [PHONE] | Phone numbers |
