@@ -37,6 +37,31 @@ _PERSON_COUNTER = [0]
 _ORG_COUNTER = [0]
 _LOC_COUNTER = [0]
 
+# spaCy's NER is casing-sensitive and trained on Title Case — it misses names
+# printed ALL CAPS (cause-title blocks, signature blocks, scanned-doc OCR output).
+# Run NER against a Title-Cased view of ALL-CAPS runs instead of the real text.
+_SHOUT_WORD_RE = re.compile(r"[A-Z]{2,}")
+_SHOUT_GAP_RE = re.compile(r"^[\s,.\-]{0,3}$")
+
+
+def _truecase_shouting(text: str) -> str:
+    """Title-case runs of 2+ consecutive ALL-CAPS words so spaCy can see them as
+    names. Same length as the input, so offsets still line up with the original
+    text — this view is only ever used to detect entity spans, not to replace."""
+    words = list(_SHOUT_WORD_RE.finditer(text))
+    out = list(text)
+    i = 0
+    while i < len(words):
+        j = i
+        while j + 1 < len(words) and _SHOUT_GAP_RE.match(text[words[j].end():words[j + 1].start()]):
+            j += 1
+        if j > i:
+            for w in words[i:j + 1]:
+                s, e = w.span()
+                out[s:e] = w.group().capitalize()
+        i = j + 1
+    return "".join(out)
+
 
 def _person_placeholder(idx: int) -> str:
     names = [
@@ -83,7 +108,7 @@ def anonymize(
     # nlp.max_length (spaCy's own memory-safety ceiling, 1M chars by default)
     # bounds a single document's NER memory use — real judgments never get
     # close to it, this just stops a pathological upload from blowing up.
-    doc = nlp(text[:nlp.max_length])
+    doc = nlp(_truecase_shouting(text[:nlp.max_length]))
 
     ner_replacements: list[tuple[int, int, str]] = []
     for ent in doc.ents:

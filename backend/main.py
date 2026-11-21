@@ -4,6 +4,7 @@ FastAPI app exposing ingestion pipeline, judgement finder, and LLM model tester.
 """
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 import logging
 import uuid
 
@@ -21,7 +22,7 @@ from db.models import CaseLaw, ModelTestResult, IngestionLog
 from pipeline.ingestion import load_dataset, row_to_dict
 from pipeline.anonymizer import anonymize
 from pipeline.document_creator import create_document
-from pipeline.pdf_extractor import extract_text_from_pdf, extract_metadata_via_llm, strip_thinking
+from pipeline.pdf_extractor import extract_pdf, extract_metadata_via_llm, strip_thinking
 from llm.groq_client import chat
 from llm.model_tester import run_model_test, MODELS
 from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -249,7 +250,16 @@ async def ingest_pdf(
     tmp_path = _safe_upload_path(file.filename, ".pdf")
     tmp_path.write_bytes(await file.read())
 
-    raw_text = extract_text_from_pdf(tmp_path)
+    try:
+        # extract_pdf is sync and can block for minutes (LlamaParse escalation) —
+        # run it off the event loop so one upload doesn't stall the whole API.
+        extraction = await asyncio.to_thread(extract_pdf, tmp_path)
+    except Exception:
+        logger.exception("PDF extraction failed for %s", file.filename)
+        _log_ingestion(db, file.filename, "failed", "Could not read PDF (corrupt or encrypted file)")
+        db.commit()
+        raise HTTPException(400, "Could not read PDF (corrupt or encrypted file)")
+    raw_text = extraction.text
     if not raw_text or len(raw_text) < 50:
         _log_ingestion(db, file.filename, "failed", "Could not extract sufficient text from PDF")
         db.commit()
@@ -268,9 +278,13 @@ async def ingest_pdf(
         db.commit()
         return PdfIngestResponse(success=False, case_id=None, message=f"Failed to process case: {error_msg}")
 
-    _log_ingestion(db, file.filename, "success", None)
+    extraction_note = f" (extraction: {extraction.method} — {extraction.reason})"
+    _log_ingestion(db, file.filename, "success", extraction_note.strip())
     db.commit()
-    return PdfIngestResponse(success=True, case_id=case.id, message="Successfully ingested PDF case.")
+    return PdfIngestResponse(
+        success=True, case_id=case.id,
+        message=f"Successfully ingested PDF case.{extraction_note}",
+    )
 
 
 def _log_ingestion(db: Session, filename: str, status: str, error: str | None):
