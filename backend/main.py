@@ -4,6 +4,7 @@ FastAPI app exposing ingestion pipeline, judgement finder, and LLM model tester.
 """
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 import logging
 import uuid
 
@@ -21,14 +22,15 @@ from db.models import CaseLaw, ModelTestResult, IngestionLog
 from pipeline.ingestion import load_dataset, row_to_dict
 from pipeline.anonymizer import anonymize
 from pipeline.document_creator import create_document
-from pipeline.pdf_extractor import extract_text_from_pdf, extract_metadata_via_llm, strip_thinking
+from pipeline.pdf_extractor import extract_pdf, extract_metadata_via_llm, strip_thinking
 from llm.groq_client import chat
 from llm.model_tester import run_model_test, MODELS
 from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from rag.indexer import index_case
-from rag.vector_store import store_size, remove_vectors
+from rag.vector_store import store_size, remove_vectors, flush as flush_vectors
 from rag import keyword_search
-from rag.finder import find_similar, eligible_case_ids
+from rag.finder import find_similar, eligible_case_ids, retrieve_chunks
+from rag.answer import build_prompt, run_llm
 
 
 @asynccontextmanager
@@ -92,8 +94,12 @@ def _safe_upload_path(filename: str, expected_ext: str) -> Path:
     return data_dir / f"{uuid.uuid4().hex}{expected_ext}"
 
 
-def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
-    """Process one row atomically. Returns (case, error_message)."""
+def _process_row(row_dict: dict, db: Session, persist_vectors: bool = True) -> tuple[CaseLaw | None, str]:
+    """Process one row atomically. Returns (case, error_message).
+
+    persist_vectors=False skips the FAISS disk write for this row — pass this
+    when ingesting many rows in a loop and flush the vector store once at the
+    end (see bulk_ingest), otherwise every row rewrites the whole index."""
     text = row_dict.get("text", "")
     if len(text) < 50:
         return None, f"Text too short ({len(text)} chars)"
@@ -119,8 +125,8 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
             judgment_date=row_dict.get("date") or None,
             subject=row_dict.get("subject") or None,
             acts_cited=row_dict.get("acts") or None,
-            raw_text=text[:50000],
-            anonymized_text=anon.anonymized_text[:50000],
+            raw_text=text,
+            anonymized_text=anon.anonymized_text,
             pii_map=anon.pii_map,
             ingestion_status="success",
         )
@@ -144,7 +150,7 @@ def _process_row(row_dict: dict, db: Session) -> tuple[CaseLaw | None, str]:
         case.generated_summary = summary
 
         # Chunk, embed, and index every window of the judgment for search
-        chunk_ids = index_case(case, db)
+        chunk_ids = index_case(case, db, persist=persist_vectors)
         case.has_embedding = bool(chunk_ids)
 
         # Commit savepoint on success
@@ -202,12 +208,15 @@ async def bulk_ingest(
     errors = []
     for idx, row in pipeline_df.iterrows():
         row_dict = row_to_dict(row)
-        case, error_msg = _process_row(row_dict, db)
+        # Skip the per-row FAISS disk write (see vector_store.add_vectors_batch)
+        # and flush once after the whole file is in.
+        case, error_msg = _process_row(row_dict, db, persist_vectors=False)
         if case:
             ingested += 1
         else:
             failed += 1
             errors.append(f"Row {idx}: {error_msg or 'Unknown error'}")
+    flush_vectors()
 
     status = "success" if failed == 0 else "partial" if ingested > 0 else "failed"
     db.add(IngestionLog(
@@ -242,7 +251,16 @@ async def ingest_pdf(
     tmp_path = _safe_upload_path(file.filename, ".pdf")
     tmp_path.write_bytes(await file.read())
 
-    raw_text = extract_text_from_pdf(tmp_path)
+    try:
+        # extract_pdf is sync and can block for minutes (LlamaParse escalation) —
+        # run it off the event loop so one upload doesn't stall the whole API.
+        extraction = await asyncio.to_thread(extract_pdf, tmp_path)
+    except Exception:
+        logger.exception("PDF extraction failed for %s", file.filename)
+        _log_ingestion(db, file.filename, "failed", "Could not read PDF (corrupt or encrypted file)")
+        db.commit()
+        raise HTTPException(400, "Could not read PDF (corrupt or encrypted file)")
+    raw_text = extraction.text
     if not raw_text or len(raw_text) < 50:
         _log_ingestion(db, file.filename, "failed", "Could not extract sufficient text from PDF")
         db.commit()
@@ -261,9 +279,13 @@ async def ingest_pdf(
         db.commit()
         return PdfIngestResponse(success=False, case_id=None, message=f"Failed to process case: {error_msg}")
 
-    _log_ingestion(db, file.filename, "success", None)
+    extraction_note = f" (extraction: {extraction.method} — {extraction.reason})"
+    _log_ingestion(db, file.filename, "success", extraction_note.strip())
     db.commit()
-    return PdfIngestResponse(success=True, case_id=case.id, message="Successfully ingested PDF case.")
+    return PdfIngestResponse(
+        success=True, case_id=case.id,
+        message=f"Successfully ingested PDF case.{extraction_note}",
+    )
 
 
 def _log_ingestion(db: Session, filename: str, status: str, error: str | None):
@@ -386,6 +408,38 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
         })
 
     return {"results": results, "query": req.query}
+
+
+class AnswerRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    year_from: int | None = None
+    year_to: int | None = None
+    acts_cited: str | None = None
+
+
+@app.post("/api/finder/answer")
+async def finder_answer(req: AnswerRequest, db: Session = Depends(get_db)):
+    """Second-phase call: generate a grounded, cited answer over the same cases the
+    search returned. Kept separate from /search so the card list renders immediately and
+    this (slower) LLM step fills in afterwards, degrading gracefully if it fails."""
+    if not req.query.strip():
+        raise HTTPException(400, "Query cannot be empty")
+
+    allowed_case_ids = eligible_case_ids(db, req.year_from, req.year_to, req.acts_cited)
+    if allowed_case_ids is not None and not allowed_case_ids:
+        return {"answer": None, "sources": [], "message": "No cases match the selected filters."}
+
+    chunks = retrieve_chunks(req.query, db, top_k=req.top_k, allowed_case_ids=allowed_case_ids)
+    if not chunks:
+        msg = "No cases indexed yet. Run bulk ingestion first." if store_size() == 0 \
+            else "No relevant cases found for this query."
+        return {"answer": None, "sources": [], "message": msg}
+
+    prepared = build_prompt(req.query, chunks, db)
+    # Only the blocking LLM call goes off the event loop; DB work stays on this thread.
+    answer = await asyncio.to_thread(run_llm, prepared["user"])
+    return {"answer": answer or None, "sources": prepared["sources"], "query": req.query}
 
 
 # ─── Model Tester ─────────────────────────────────────────────────────────────

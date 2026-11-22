@@ -65,13 +65,15 @@ def _rrf_fuse(*ranked_lists: list[dict]) -> dict[int, float]:
     return fused
 
 
-def find_similar(
+def retrieve_chunks(
     query: str, db: Session, top_k: int = 5, allowed_case_ids: set[int] | None = None
 ) -> list[dict]:
-    """Return up to top_k distinct cases, each with its best-matching chunk as the
-    snippet. Shape: [{case_id, score, snippet}], ordered by fused rank; score is the
-    raw cosine similarity for display, not the fused value used to pick the order.
-    allowed_case_ids, if given, restricts results to that set (used by search filters)."""
+    """Fused vector + keyword chunk hits in rank order, BEFORE merging to one-per-case.
+    Shape: [{chunk_id, case_id, chunk_text, vector_score}], best-first. Empty if nothing
+    in the corpus is even semantically plausible (the abstention floor). vector_score is
+    the raw cosine for display, falling back to the best known one for a chunk found by
+    keyword search alone. allowed_case_ids, if given, restricts to that set.
+    Both find_similar and answer generation share this so there's one retrieval path."""
     vec = embed_one(query)
     vector_hits = vector_store.search(vec, top_k=top_k * FANOUT)
     if not vector_hits or vector_hits[0]["score"] < MIN_VECTOR_SCORE:
@@ -89,14 +91,36 @@ def find_similar(
     chunk_ids = [cid for cid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
     rows = {r.id: r for r in db.query(CaseChunk).filter(CaseChunk.id.in_(chunk_ids)).all()}
 
-    best: dict[int, dict] = {}  # case_id -> hit; first (highest-ranked) chunk per case wins
+    out: list[dict] = []
     for cid in chunk_ids:
         row = rows.get(cid)
-        if row is None or row.case_id in best:
+        if row is None:
             continue
         if allowed_case_ids is not None and row.case_id not in allowed_case_ids:
             continue
-        display_score = vector_score_by_chunk.get(cid, best_vector_score)
-        best[row.case_id] = {"case_id": row.case_id, "score": display_score, "snippet": row.chunk_text}
+        out.append({
+            "chunk_id": cid,
+            "case_id": row.case_id,
+            "chunk_text": row.chunk_text,
+            "vector_score": vector_score_by_chunk.get(cid, best_vector_score),
+        })
+    return out
 
+
+def find_similar(
+    query: str, db: Session, top_k: int = 5, allowed_case_ids: set[int] | None = None
+) -> list[dict]:
+    """Return up to top_k distinct cases, each with its best-matching chunk as the
+    snippet. Shape: [{case_id, score, snippet}], ordered by fused rank; score is the
+    raw cosine similarity for display, not the fused value used to pick the order.
+    allowed_case_ids, if given, restricts results to that set (used by search filters)."""
+    best: dict[int, dict] = {}  # case_id -> hit; first (highest-ranked) chunk per case wins
+    for c in retrieve_chunks(query, db, top_k=top_k, allowed_case_ids=allowed_case_ids):
+        if c["case_id"] in best:
+            continue
+        best[c["case_id"]] = {
+            "case_id": c["case_id"],
+            "score": c["vector_score"],
+            "snippet": c["chunk_text"],
+        }
     return list(best.values())[:top_k]

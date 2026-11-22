@@ -53,3 +53,5 @@ data/*
 
 # Retrieval eval harness - local only, not for GitHub
 backend/eval/
+
+CLAUDE.md

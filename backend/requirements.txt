@@ -7,7 +7,7 @@ faiss-cpu==1.9.0.post1
 pandas==2.2.3
 python-dotenv==1.0.1
 sqlalchemy==2.0.36
-pydantic==2.10.3
+pydantic==2.14.3
 pydantic-settings==2.6.1
 python-multipart==0.0.12
 httpx==0.27.2
@@ -16,3 +16,6 @@ aiofiles==24.1.0
 fpdf2==2.8.1
 pytest==8.3.3
 pdfplumber==0.11.0
+PyMuPDF==2.1
+llama-cloud-services==0.6.94
+ftfy==6.3.1

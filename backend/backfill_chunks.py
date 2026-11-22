@@ -26,11 +26,14 @@ def main():
         cases = db.query(CaseLaw).filter(CaseLaw.anonymized_text.isnot(None)).all()
         total_chunks = 0
         for case in cases:
-            ids = index_case(case, db)
+            # persist=False: skip the per-case FAISS disk write (it rewrites the
+            # whole index/cache every call), flush once at the end instead.
+            ids = index_case(case, db, persist=False)
             case.has_embedding = bool(ids)
             total_chunks += len(ids)
             db.commit()
             print(f"case {case.id}: {len(ids)} chunks")
+        vector_store.flush()
         print(f"Done: {len(cases)} cases, {total_chunks} chunks indexed.")
     finally:
         db.close()

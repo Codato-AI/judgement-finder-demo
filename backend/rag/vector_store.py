@@ -255,8 +255,13 @@ def add_vector(item_id: int, vector: np.ndarray) -> int:
     return add_vectors_batch([item_id], vector.reshape(1, -1))[0]
 
 
-def add_vectors_batch(item_ids: list[int], vectors: np.ndarray) -> list[int]:
-    """Add embeddings keyed by item_id (a chunk id). Returns FAISS positions."""
+def add_vectors_batch(item_ids: list[int], vectors: np.ndarray, persist: bool = True) -> list[int]:
+    """Add embeddings keyed by item_id (a chunk id). Returns FAISS positions.
+
+    persist=False skips the disk write for this call — _persist() rewrites the
+    whole index + vector cache every time, so a bulk loader doing this per-case
+    would do an O(n^2) amount of I/O. Bulk callers should pass persist=False
+    and call flush() once at the end (or every N cases as a checkpoint)."""
     global _vector_cache
     with _lock:
         idx = _get_index()
@@ -267,8 +272,16 @@ def add_vectors_batch(item_ids: list[int], vectors: np.ndarray) -> list[int]:
         _id_map.extend(item_ids)
         for item_id, vec in zip(item_ids, vectors):
             _vector_cache[item_id] = vec.copy()
-        _persist()
+        if persist:
+            _persist()
         return positions
+
+
+def flush():
+    """Persist the current in-memory index/cache to disk. Call after a batch
+    of add_vectors_batch(..., persist=False) calls."""
+    with _lock:
+        _persist()
 
 
 def search(query_vector: np.ndarray, top_k: int = 5) -> list[dict]:

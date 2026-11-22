@@ -31,20 +31,34 @@ export default function JudgementFinder() {
   const [yearFrom, setYearFrom] = useState('')
   const [yearTo, setYearTo] = useState('')
   const [actsCited, setActsCited] = useState('')
+  const [answer, setAnswer] = useState(null)
+  const [answerSources, setAnswerSources] = useState([])
+  const [answerLoading, setAnswerLoading] = useState(false)
 
   const search = async () => {
     if (!query.trim()) return
     setLoading(true)
     setError(null)
     setResults(null)
+    setAnswer(null)
+    setAnswerSources([])
+    setAnswerLoading(false)
+    const filters = {
+      year_from: yearFrom ? Number(yearFrom) : null,
+      year_to: yearTo ? Number(yearTo) : null,
+      acts_cited: actsCited.trim() || null,
+    }
     try {
-      const filters = {
-        year_from: yearFrom ? Number(yearFrom) : null,
-        year_to: yearTo ? Number(yearTo) : null,
-        acts_cited: actsCited.trim() || null,
-      }
       const data = await api.finderSearch(query, 5, filters)
       setResults(data)
+      if (data.results.length > 0) {
+        // Second phase: the answer is best-effort, cards already show, so failures are silent.
+        setAnswerLoading(true)
+        api.finderAnswer(query, 5, filters)
+          .then((a) => { setAnswer(a.answer); setAnswerSources(a.sources || []) })
+          .catch(() => {})
+          .finally(() => setAnswerLoading(false))
+      }
     } catch (e) {
       setError(e.message)
     } finally {
@@ -146,6 +160,43 @@ export default function JudgementFinder() {
               ? `Found ${results.results.length} similar judgments`
               : results.message || 'No results found'}
           </p>
+
+          {results.results.length > 0 && (answerLoading || answer) && (
+            <div className="card mb-4 border-l-2 border-saffron-500">
+              <div className="flex items-center gap-2 mb-2">
+                <Scale size={15} className="text-saffron-400" />
+                <h2 className="text-white font-semibold text-sm">AI Answer</h2>
+              </div>
+              {answerLoading && !answer && (
+                <p className="text-slate-400 text-sm flex items-center gap-2">
+                  <Loader2 size={14} className="animate-spin" /> Generating grounded answer…
+                </p>
+              )}
+              {answer && (
+                <>
+                  <p className="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">{answer}</p>
+                  {answerSources.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-xs text-slate-500 uppercase tracking-wide">Sources</p>
+                      {answerSources.map((s) => (
+                        <button key={s.n} onClick={() => setExpandedId(s.case_id)} className="block text-left w-full">
+                          <span className="text-saffron-400 font-mono text-xs">[#{s.n}]</span>{' '}
+                          <span className="text-slate-300 text-xs">{s.label}</span>
+                          <span className="block text-slate-500 text-xs italic border-l-2 border-slate-700 pl-2 mt-0.5">
+                            {s.passage.length > 240 ? `${s.passage.slice(0, 240)}…` : s.passage}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-slate-600 text-xs mt-3 border-t border-slate-800 pt-2">
+                    Research assistance based on retrieved judgments, not legal advice. Verify every citation against the source.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+
           <div className="space-y-3">
             {results.results.map((r, i) => (
               <div key={r.case_id} className="card">
