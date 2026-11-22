@@ -29,7 +29,8 @@ from llm.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from rag.indexer import index_case
 from rag.vector_store import store_size, remove_vectors, flush as flush_vectors
 from rag import keyword_search
-from rag.finder import find_similar, eligible_case_ids
+from rag.finder import find_similar, eligible_case_ids, retrieve_chunks
+from rag.answer import build_prompt, run_llm
 
 
 @asynccontextmanager
@@ -407,6 +408,38 @@ def judgement_finder(req: FinderRequest, db: Session = Depends(get_db)):
         })
 
     return {"results": results, "query": req.query}
+
+
+class AnswerRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    year_from: int | None = None
+    year_to: int | None = None
+    acts_cited: str | None = None
+
+
+@app.post("/api/finder/answer")
+async def finder_answer(req: AnswerRequest, db: Session = Depends(get_db)):
+    """Second-phase call: generate a grounded, cited answer over the same cases the
+    search returned. Kept separate from /search so the card list renders immediately and
+    this (slower) LLM step fills in afterwards, degrading gracefully if it fails."""
+    if not req.query.strip():
+        raise HTTPException(400, "Query cannot be empty")
+
+    allowed_case_ids = eligible_case_ids(db, req.year_from, req.year_to, req.acts_cited)
+    if allowed_case_ids is not None and not allowed_case_ids:
+        return {"answer": None, "sources": [], "message": "No cases match the selected filters."}
+
+    chunks = retrieve_chunks(req.query, db, top_k=req.top_k, allowed_case_ids=allowed_case_ids)
+    if not chunks:
+        msg = "No cases indexed yet. Run bulk ingestion first." if store_size() == 0 \
+            else "No relevant cases found for this query."
+        return {"answer": None, "sources": [], "message": msg}
+
+    prepared = build_prompt(req.query, chunks, db)
+    # Only the blocking LLM call goes off the event loop; DB work stays on this thread.
+    answer = await asyncio.to_thread(run_llm, prepared["user"])
+    return {"answer": answer or None, "sources": prepared["sources"], "query": req.query}
 
 
 # ─── Model Tester ─────────────────────────────────────────────────────────────

@@ -49,6 +49,12 @@ export const api = {
       body: JSON.stringify({ query, top_k, ...filters }),
     }),
 
+  finderAnswer: (query, top_k = 5, filters = {}) =>
+    request('/finder/answer', {
+      method: 'POST',
+      body: JSON.stringify({ query, top_k, ...filters }),
+    }),
+
   testModels: (case_id, model_ids = null) =>
     request('/models/test', {
       method: 'POST',
